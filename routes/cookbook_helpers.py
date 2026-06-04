@@ -526,11 +526,25 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     fail with "CUDA Toolkit not found" instead of building with HIP.
     """
     # Detect pip-installed nvcc (from vLLM/nvidia CUDA wheels) and put it on PATH
-    # so cmake's CUDA configure can find it. We keep this after the ROCm/HIP
-    # check — a machine with both stacks should honor the native HIP toolchain on
-    # AMD hosts instead of accidentally preferring a stray nvcc wheel.
+    # so cmake's CUDA configure can find it. The PyPI nvidia-* wheel layout is
+    # close to a CUDA toolkit but misses the unversioned .so names/lib64 path that
+    # CMake's FindCUDAToolkit expects (e.g. libcudart.so, libcublas.so). Create a
+    # small compatibility view in-place before invoking cmake. We keep this after
+    # the ROCm/HIP check — a machine with both stacks should honor the native HIP
+    # toolchain on AMD hosts instead of accidentally preferring a stray nvcc wheel.
     runner_lines.append('    for _cudir in ~/.local/lib/python*/site-packages/nvidia/cu13 ~/.local/lib/python*/site-packages/nvidia/cu12 ~/.local/lib/python*/site-packages/nvidia/cuda_nvcc; do')
-    runner_lines.append('      [ -x "$_cudir/bin/nvcc" ] && export CUDA_HOME="$_cudir" && export PATH="$_cudir/bin:$PATH" && break')
+    runner_lines.append('      if [ -x "$_cudir/bin/nvcc" ]; then')
+    runner_lines.append('        export CUDA_HOME="$_cudir" CUDAToolkit_ROOT="$_cudir"')
+    runner_lines.append('        export PATH="$_cudir/bin:$PATH"')
+    runner_lines.append('        export LD_LIBRARY_PATH="$_cudir/lib:${LD_LIBRARY_PATH:-}"')
+    runner_lines.append('        [ -d "$_cudir/lib" ] && ln -sfn lib "$_cudir/lib64" 2>/dev/null || true')
+    runner_lines.append('        for _cuver in libcudart.so.* libcublas.so.* libcublasLt.so.* libnvrtc.so.* libnvJitLink.so.*; do')
+    runner_lines.append('          [ -e "$_cudir/lib/$_cuver" ] || continue')
+    runner_lines.append('          _cuso="${_cuver%.*}"')
+    runner_lines.append('          [ -e "$_cudir/lib/$_cuso" ] || ln -s "$_cuver" "$_cudir/lib/$_cuso" 2>/dev/null || true')
+    runner_lines.append('        done')
+    runner_lines.append('        break')
+    runner_lines.append('      fi')
     runner_lines.append('    done')
     # rm -rf build so a prior poisoned CMakeCache.txt (e.g. from a failed CUDA
     # or HIP attempt) doesn't cause the next configure to reuse stale settings.
@@ -544,7 +558,7 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
     runner_lines.append('    elif command -v nvcc &>/dev/null; then')
     runner_lines.append('      echo "[odysseus] CUDA nvcc found — building llama-server with CUDA (GPU) support..."')
-    runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
+    runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON ${CUDAToolkit_ROOT:+-DCUDAToolkit_ROOT="$CUDAToolkit_ROOT"} -DCMAKE_CUDA_FLAGS="${CMAKE_CUDA_FLAGS:-} -DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK" && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
     runner_lines.append('    else')
     runner_lines.append('      echo "[odysseus] WARNING: no HIP/CUDA toolchain found — building llama-server for CPU only."')
     runner_lines.append('      echo "[odysseus]   GPU inference will not be available for this llama.cpp build."')

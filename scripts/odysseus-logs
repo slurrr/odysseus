@@ -3,6 +3,7 @@
 
 Right now logs live in two places:
   - logs/                       app-level (compound.log, future runtime)
+  - logs/startup/               durable model serve startup output
   - /tmp/odysseus-tmux/*.log    per-tmux-session model download/serve logs
 
 This CLI surfaces them so you don't have to remember which directory
@@ -30,13 +31,14 @@ from pathlib import Path
 
 
 _APP_LOGS = _REPO_ROOT / "logs"
+_STARTUP_LOGS = _APP_LOGS / "startup"
 _TMUX_LOGS = Path("/tmp/odysseus-tmux")
 
 
 def _enumerate() -> list[dict]:
     """Return every known log file as {name, path, bytes, modified}."""
     out = []
-    for base in (_APP_LOGS, _TMUX_LOGS):
+    for base in (_STARTUP_LOGS, _APP_LOGS, _TMUX_LOGS):
         if not base.is_dir():
             continue
         for p in sorted(base.glob("*.log")):
@@ -61,7 +63,7 @@ def _resolve(name: str) -> Path | None:
     if not isinstance(name, str):
         return None
     candidates = []
-    for base in (_APP_LOGS, _TMUX_LOGS):
+    for base in (_STARTUP_LOGS, _APP_LOGS, _TMUX_LOGS):
         if not base.is_dir():
             continue
         for p in base.glob("*.log"):

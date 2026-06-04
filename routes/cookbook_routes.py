@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from src.auth_helpers import require_user
 from pydantic import BaseModel
 
+from core.constants import BASE_DIR
 from core.middleware import require_admin
 from core.platform_compat import (
     IS_WINDOWS,
@@ -855,8 +856,14 @@ def setup_cookbook_routes() -> APIRouter:
             _validate_serve_model_id(req.repo_id)
         TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
         session_id = f"serve-{uuid.uuid4().hex[:8]}"
+        log_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id).strip(".-")
+        if not log_slug:
+            log_slug = "serve"
         remote = req.remote_host
         is_windows = req.platform == "windows"
+        startup_log_path: str | None = None
+        startup_all_log_path: str | None = None
+        startup_index_path: str | None = None
         # LOCAL execution on a native-Windows host never uses tmux (detached
         # process path below), regardless of the UI-supplied platform.
         local_windows = IS_WINDOWS and not remote
@@ -926,6 +933,22 @@ def setup_cookbook_routes() -> APIRouter:
         else:
             # ── Linux/Termux: bash + tmux (existing flow) ──
             runner_lines = ["#!/bin/bash"]
+            if not remote:
+                startup_log_dir = Path(BASE_DIR) / "logs" / "startup"
+                startup_log_dir.mkdir(parents=True, exist_ok=True)
+                startup_log_path = str(startup_log_dir / f"{log_slug}-{session_id}.log")
+                startup_all_log_path = str(startup_log_dir / "all.log")
+                startup_index_path = str(startup_log_dir / "index.log")
+                runner_lines.append(f"ODYSSEUS_STARTUP_LOG={shlex.quote(startup_log_path)}")
+                runner_lines.append(f"ODYSSEUS_STARTUP_DISPLAY_LOG={shlex.quote(startup_log_path)}")
+            else:
+                startup_log_path = f"~/odysseus-logs/startup/{log_slug}-{session_id}.log"
+                startup_all_log_path = "~/odysseus-logs/startup/all.log"
+                startup_index_path = "~/odysseus-logs/startup/index.log"
+                runner_lines.append(f"ODYSSEUS_STARTUP_LOG=\"$HOME/odysseus-logs/startup/{log_slug}-{session_id}.log\"")
+                runner_lines.append(f"ODYSSEUS_STARTUP_DISPLAY_LOG={shlex.quote(startup_log_path)}")
+            runner_lines.append('echo "[odysseus] startup log: $ODYSSEUS_STARTUP_DISPLAY_LOG"')
+            runner_lines.append(f'echo "[odysseus] tmux session: {session_id}"')
             runner_lines.extend(_user_shell_path_bootstrap())
             runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=""')
             # Put Odysseus's own venv bin on PATH (local runs only) so the serve
@@ -956,6 +979,24 @@ def setup_cookbook_routes() -> APIRouter:
                 # ollama is found (otherwise macOS falls back to a slow source build).
                 # /opt/homebrew = Apple Silicon, /usr/local = Intel; harmless on Linux.
                 runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:$HOME/llama.cpp/build/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
+                # If llama-server was built against pip-installed nvidia CUDA wheels,
+                # it needs their lib dir on LD_LIBRARY_PATH even on later launches
+                # where the source-build preflight is skipped because llama-server
+                # already exists on PATH.
+                runner_lines.append('for _cudir in ~/.local/lib/python*/site-packages/nvidia/cu13 ~/.local/lib/python*/site-packages/nvidia/cu12 ~/.local/lib/python*/site-packages/nvidia/cuda_nvcc; do')
+                runner_lines.append('  if [ -x "$_cudir/bin/nvcc" ]; then')
+                runner_lines.append('    export CUDA_HOME="${CUDA_HOME:-$_cudir}" CUDAToolkit_ROOT="${CUDAToolkit_ROOT:-$_cudir}"')
+                runner_lines.append('    export PATH="$_cudir/bin:$PATH"')
+                runner_lines.append('    export LD_LIBRARY_PATH="$_cudir/lib:$HOME/llama.cpp/build/bin:${LD_LIBRARY_PATH:-}"')
+                runner_lines.append('    [ -d "$_cudir/lib" ] && ln -sfn lib "$_cudir/lib64" 2>/dev/null || true')
+                runner_lines.append('    for _cuver in libcudart.so.* libcublas.so.* libcublasLt.so.* libnvrtc.so.* libnvJitLink.so.*; do')
+                runner_lines.append('      [ -e "$_cudir/lib/$_cuver" ] || continue')
+                runner_lines.append('      _cuso="${_cuver%.*}"')
+                runner_lines.append('      [ -e "$_cudir/lib/$_cuso" ] || ln -s "$_cuver" "$_cudir/lib/$_cuso" 2>/dev/null || true')
+                runner_lines.append('    done')
+                runner_lines.append('    break')
+                runner_lines.append('  fi')
+                runner_lines.append('done')
                 runner_lines.append('if [ -d /data/data/com.termux ]; then')
                 runner_lines.append('  # Termux: no native build — use the Python bindings (CPU).')
                 runner_lines.append('  if ! python3 -c "import llama_cpp" 2>/dev/null; then')
@@ -1111,7 +1152,6 @@ def setup_cookbook_routes() -> APIRouter:
                 _Pf = f"-P {_port} " if _port and _port != "22" else ""
                 _pf = f"-p {_port} " if _port and _port != "22" else ""
                 if "scripts/diffusion_server.py" in req.cmd:
-                    from core.constants import BASE_DIR
                     diff_script = Path(BASE_DIR) / "scripts" / "diffusion_server.py"
                     if diff_script.exists():
                         scp_extras = f"scp -O {_Pf}-q '{diff_script}' {remote}:.diffusion_server.py && "
@@ -1124,10 +1164,43 @@ def setup_cookbook_routes() -> APIRouter:
                 setup_cmd = (
                     f"{scp_extras}"
                     f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
-                    f"ssh {_pf}{remote} 'chmod +x {remote_runner} && tmux new-session -d -s {session_id} \"./{remote_runner}\"'"
+                    f"ssh {_pf}{remote} "
+                    + shlex.quote(
+                        "set -e; "
+                        f"chmod +x {shlex.quote(remote_runner)}; "
+                        "ODYSSEUS_LOG_DIR=\"$HOME/odysseus-logs/startup\"; "
+                        f"ODYSSEUS_LOG_FILE=\"$ODYSSEUS_LOG_DIR/{log_slug}-{session_id}.log\"; "
+                        "ODYSSEUS_ALL_LOG=\"$ODYSSEUS_LOG_DIR/all.log\"; "
+                        "ODYSSEUS_INDEX=\"$ODYSSEUS_LOG_DIR/index.log\"; "
+                        "mkdir -p \"$ODYSSEUS_LOG_DIR\"; "
+                        ": > \"$ODYSSEUS_LOG_FILE\"; "
+                        "ln -sfn \"$(basename \"$ODYSSEUS_LOG_FILE\")\" \"$ODYSSEUS_LOG_DIR/latest.log\" 2>/dev/null || true; "
+                        f"printf '%s\\t%s\\t%s\\t%s\\n' \"$(date -Is 2>/dev/null || date)\" {shlex.quote(session_id)} {shlex.quote(req.repo_id)} {shlex.quote(startup_log_path or '')} >> \"$ODYSSEUS_INDEX\"; "
+                        f"tmux new-session -d -s {shlex.quote(session_id)} "
+                        + shlex.quote(f"bash -lc 'sleep 0.2; exec ./{remote_runner}'")
+                        + "; "
+                        f"tmux pipe-pane -o -t {shlex.quote(session_id)} "
+                        + shlex.quote(
+                            f"tee -a \"$HOME/odysseus-logs/startup/{log_slug}-{session_id}.log\" "
+                            "\"$HOME/odysseus-logs/startup/all.log\" >/dev/null"
+                        )
+                    )
                 )
             else:
-                setup_cmd = f"tmux new-session -d -s {session_id} {shlex.quote(str(runner_path))}"
+                assert startup_log_path is not None
+                assert startup_all_log_path is not None
+                assert startup_index_path is not None
+                startup_log_dir = str(Path(startup_log_path).parent)
+                tmux_runner_cmd = f"bash -lc {shlex.quote(f'sleep 0.2; exec {shlex.quote(str(runner_path))}')}"
+                tmux_pipe_cmd = f"tee -a {shlex.quote(startup_log_path)} {shlex.quote(startup_all_log_path)} >/dev/null"
+                setup_cmd = (
+                    f"mkdir -p {shlex.quote(startup_log_dir)} && "
+                    f": > {shlex.quote(startup_log_path)} && "
+                    f"ln -sfn {shlex.quote(Path(startup_log_path).name)} {shlex.quote(str(Path(startup_log_dir) / 'latest.log'))} 2>/dev/null || true; "
+                    f"printf '%s\\t%s\\t%s\\t%s\\n' \"$(date -Is 2>/dev/null || date)\" {shlex.quote(session_id)} {shlex.quote(req.repo_id)} {shlex.quote(startup_log_path)} >> {shlex.quote(startup_index_path)} && "
+                    f"tmux new-session -d -s {shlex.quote(session_id)} {shlex.quote(tmux_runner_cmd)} && "
+                    f"tmux pipe-pane -o -t {shlex.quote(session_id)} {shlex.quote(tmux_pipe_cmd)}"
+                )
 
         if setup_cmd is None:
             # LOCAL Windows: launch the bash runner detached; no tmux setup_cmd.
@@ -1169,7 +1242,7 @@ def setup_cookbook_routes() -> APIRouter:
             pass
 
         return {"ok": True, "session_id": session_id, "remote": remote or "local",
-                "endpoint_id": endpoint_id}
+                "endpoint_id": endpoint_id, "log_path": startup_log_path}
 
     # ── Server setup (install deps on remote) ──
 
@@ -2071,6 +2144,13 @@ def setup_cookbook_routes() -> APIRouter:
             if download_zero_files:
                 diagnosis = {"message": "No matching files were downloaded. The model repo or filename/quant pattern may be wrong (for example a ':Q4_K_M' tag that does not exist in the repo). Check the repo and the include/quant pattern."}
             output_tail = "\n".join(full_snapshot.splitlines()[-12:]) if full_snapshot else ""
+            task_log_path = _payload.get("log_path")
+            if not task_log_path and task_type == "serve" and not remote and not IS_WINDOWS:
+                status_log_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (_payload.get("repo_id") or model or "serve").split("/")[-1]).strip(".-") or "serve"
+                task_log_path = str(Path(BASE_DIR) / "logs" / "startup" / f"{status_log_slug}-{session_id}.log")
+            elif not task_log_path and task_type == "serve" and remote and task_platform != "windows":
+                status_log_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (_payload.get("repo_id") or model or "serve").split("/")[-1]).strip(".-") or "serve"
+                task_log_path = f"~/odysseus-logs/startup/{status_log_slug}-{session_id}.log"
 
             results.append({
                 "session_id": session_id,
@@ -2086,6 +2166,7 @@ def setup_cookbook_routes() -> APIRouter:
                 "reqs": phase_info.get("reqs"),
                 "pct": phase_info.get("pct"),
                 "remote": remote or "local",
+                "log_path": task_log_path,
             })
 
         return {"tasks": results}
