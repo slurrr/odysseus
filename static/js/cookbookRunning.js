@@ -502,7 +502,9 @@ async function _startQueuedDownload(task) {
       _renderRunningTab();
       return;
     }
-    const data = await res.json();
+    const raw = await res.text();
+    let data = {};
+    try { data = raw ? JSON.parse(raw) : {}; } catch { data = { ok: false, error: raw || res.statusText }; }
     if (!data.ok) {
       _updateTask(task.sessionId, { status: 'error', output: data.error || 'Unknown error' });
       _renderRunningTab();
@@ -1557,7 +1559,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
     // _fields = the exact structured serve-form values used for this launch,
     // so the "Edit / relaunch" button can re-open the Serve panel pre-filled
     // with these precise settings (not just the last-used-for-repo state).
-    const payload = { repo_id: repo, remote_host: _host || undefined, ssh_port: _sp || undefined, _cmd: cmd, _fields: fields || undefined, _env: _usedEnv, _envPath: _usedEnvPath, _gpus: _usedGpus };
+    const payload = { repo_id: repo, remote_host: _host || undefined, ssh_port: _sp || undefined, _cmd: cmd, _fields: fields || undefined, _env: _usedEnv, _envPath: _usedEnvPath, _gpus: _usedGpus, log_path: data.log_path || undefined };
     _addTask(data.session_id, shortName, 'serve', payload);
     uiModule.showToast(`Serving ${shortName}...`);
   } catch (e) {
@@ -2185,6 +2187,15 @@ export function _renderRunningTab() {
           const tmuxAttach = `tmux attach -t ${task.sessionId}`;
           items.push({ label: 'Copy tmux', action: 'copy-tmux', custom: () => {
             _copyText(tmuxAttach);
+          }});
+        }
+        const startupLog = task.payload?.log_path || task.log_path || '';
+        if (startupLog) {
+          const logCmd = task.remoteHost
+            ? `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} "tail -f ${String(startupLog).replace(/"/g, '\\"')}"`
+            : `tail -f ${_shQuote(startupLog)}`;
+          items.push({ label: 'Copy startup log', action: 'copy-log-path', custom: () => {
+            _copyText(logCmd);
           }});
         }
         if (_shouldOfferCrashReport(task)) {
@@ -3506,6 +3517,10 @@ async function _pollBackgroundStatus() {
         }
         if ((live.status === 'running' || live.status === 'ready') && task.status !== live.status) {
           updates.status = live.status === 'ready' ? 'ready' : 'running';
+        }
+        if (live.log_path && task.payload && task.payload.log_path !== live.log_path) {
+          task.payload.log_path = live.log_path;
+          changed = true;
         }
         if (live.progress && live.progress !== task.progress) updates.progress = live.progress;
         if (live.output_tail) {

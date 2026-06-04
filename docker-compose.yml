@@ -4,14 +4,25 @@ services:
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
     volumes:
+      # Development source mounts. `docker compose up -d --force-recreate`
+      # does not rebuild the image, so mount the code paths that the app
+      # executes at runtime; otherwise route/static/script edits are ignored
+      # until `docker compose build` is run.
+      - ./routes:/app/routes:z
+      - ./static:/app/static:z
+      - ./scripts:/app/scripts:z
       - ./data:/app/data:z
       - ./logs:/app/logs:z
       # Cookbook remote-server SSH identity. Odysseus can generate a key here;
       # add the shown public key to each remote server's authorized_keys.
       - ./data/ssh:/app/.ssh:z
-      # Cookbook local model cache. Inside Docker, "Local" means the Odysseus
-      # container, so persist its HuggingFace cache under ./data/huggingface.
-      - ./data/huggingface:/app/.cache/huggingface:z
+      # Cookbook local model cache. One shared host cache, mounted into the
+      # container so HF downloads are reused instead of re-downloaded.
+      # Override HF_CACHE_DIR only if you want a different host location.
+      - ${HF_CACHE_DIR:-/home/poop/models/hf}:/app/.cache/huggingface:z
+      # FastEmbed's ONNX cache lives separately; persist it too so embeddings
+      # don't redownload on container recreate.
+      - ${FASTEMBED_CACHE_DIR:-/home/poop/models/fastembed}:/app/.cache/fastembed:z
       # Cookbook-installed Python CLIs/packages (vLLM, llama-cpp-python, etc.)
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
@@ -28,6 +39,9 @@ services:
       - RESEARCH_LLM_ENDPOINT=${RESEARCH_LLM_ENDPOINT:-}
       - HF_TOKEN=${HF_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - HF_HOME=/app/.cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface/hub
+      - FASTEMBED_CACHE_PATH=/app/.cache/fastembed
       - SEARXNG_INSTANCE=http://searxng:8080
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8000
@@ -41,7 +55,6 @@ services:
       - EMBEDDING_URL=${EMBEDDING_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
       - FASTEMBED_MODEL=${FASTEMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      - FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}
       - CLEANUP_INTERVAL_HOURS=${CLEANUP_INTERVAL_HOURS:-24}
       - ODYSSEUS_INPROCESS_POLLERS=${ODYSSEUS_INPROCESS_POLLERS:-1}
       - ODYSSEUS_INPROCESS_TASKS=${ODYSSEUS_INPROCESS_TASKS:-1}

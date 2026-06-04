@@ -1219,10 +1219,12 @@ export function _expandModelRow(row, modelData) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        const data = await res.json();
+        const raw = await res.text();
+        let data = {};
+        try { data = raw ? JSON.parse(raw) : {}; } catch { data = { ok: false, error: raw || res.statusText }; }
         if (data.ok) {
           const shortName = modelData.name.split('/').pop();
-          _addTask(data.session_id, shortName, 'serve', { _cmd: cmd, model: modelData.name, backend: runBackend, remote_host: host });
+          _addTask(data.session_id, shortName, 'serve', { _cmd: cmd, model: modelData.name, backend: runBackend, remote_host: host, log_path: data.log_path || undefined });
           _renderRunningTab();
           uiModule.showToast(`Launching ${shortName}...`);
           // Switch to Running tab

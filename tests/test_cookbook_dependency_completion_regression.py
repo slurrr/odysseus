@@ -79,6 +79,33 @@ def test_dependency_install_payload_keeps_env_path_for_refresh():
     assert "env_path: _envState.envPath || ''" in source
 
 
+def test_model_serve_writes_durable_startup_log():
+    source = _read("routes/cookbook_routes.py")
+
+    assert 'Path(BASE_DIR) / "logs" / "startup"' in source
+    assert 'ODYSSEUS_STARTUP_ALL_LOG="$ODYSSEUS_STARTUP_DIR/all.log"' in source
+    assert 'ODYSSEUS_STARTUP_INDEX="$ODYSSEUS_STARTUP_DIR/index.log"' in source
+    assert 'latest.log' in source
+    assert 'exec > >(tee -a "$ODYSSEUS_STARTUP_LOG" "$ODYSSEUS_STARTUP_ALL_LOG") 2>&1' in source
+    assert 'echo "[odysseus] startup log: $ODYSSEUS_STARTUP_DISPLAY_LOG"' in source
+    assert '"log_path": startup_log_path' in source
+
+
+def test_running_task_persists_startup_log_path():
+    source = _read("static/js/cookbookRunning.js")
+
+    assert "log_path: data.log_path || undefined" in source
+    assert "task.payload.log_path = live.log_path;" in source
+    assert "Copy startup log" in source
+
+
+def test_odysseus_logs_discovers_startup_logs():
+    source = _read("scripts/odysseus-logs")
+
+    assert '_STARTUP_LOGS = _APP_LOGS / "startup"' in source
+    assert "(_STARTUP_LOGS, _APP_LOGS, _TMUX_LOGS)" in source
+
+
 def test_local_dependency_probe_refreshes_user_site_visibility():
     source = _read("routes/shell_routes.py")
 
