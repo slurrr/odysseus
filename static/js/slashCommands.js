@@ -5409,6 +5409,16 @@ async function _cmdColor(args, ctx) {
 
 // ── Help (generated dynamically from COMMANDS) ──
 
+async function _cmdInspector(args, ctx) {
+  try {
+    const mod = await import('./inspector.js');
+    await (mod.open ? mod.open() : mod.default.open());
+  } catch (e) {
+    slashReply('Inspector failed to open: ' + ctx.esc(e.message || String(e)));
+  }
+  return true;
+}
+
 async function _cmdHelp(args, ctx) {
   const categories = {};
   for (const [name, def] of Object.entries(COMMANDS)) {
@@ -5648,6 +5658,14 @@ const COMMANDS = {
     help: 'Tasks tour: adding and managing tasks',
     handler: _cmdTourTask2,
     usage: '/tour-task-2'
+  },
+  inspector: {
+    alias: ['inspect'],
+    category: 'AI Tools',
+    help: 'Open local prompt/tool/context inspector',
+    handler: _cmdInspector,
+    noUserBubble: true,
+    usage: '/inspector'
   },
   prompt: {
     alias: [],

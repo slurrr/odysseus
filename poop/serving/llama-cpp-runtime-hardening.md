@@ -116,6 +116,27 @@ This is useful for UI/research concurrency, but can increase KV memory. For Deep
 
 If unstable, test a lower parallel setting and/or lower research extraction concurrency.
 
+## Local model paths in Docker
+
+The container now mounts the workstation model tree as:
+
+```text
+host:      /home/poop/models
+container: /models
+```
+
+Cookbook model search paths should use container paths, for example:
+
+```text
+/models/active
+/models/local/quants/llm-compressor-artifacts
+/models/hf/hub
+```
+
+The same host tree is also mounted at `/home/poop/models` inside the container so existing absolute symlinks under `/models/active` resolve. Prefer `/models/...` in the UI, but `/home/poop/models/...` now also works for compatibility.
+
+The cache scanner treats each immediate child directory as a model. It was patched to also handle a scan path that is itself a model folder and to allow safe symlinked model directories, which matters for `/models/active`.
+
 ## Commands
 
 ```bash

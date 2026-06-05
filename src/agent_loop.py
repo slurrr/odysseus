@@ -1748,6 +1748,20 @@ async def stream_agent_loop(
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+        try:
+            from src import debug_trace as _trace
+            _trace.set_tools({
+                "agent_mode": True,
+                "native_tools_sent": bool(_is_api_model and all_tool_schemas),
+                "fenced_prompt_used": not bool(_is_api_model),
+                "disabled_tools": sorted(disabled_tools or []),
+                "relevant_tools": sorted(_relevant_tools) if _relevant_tools else [],
+                "sent_tool_names": _tool_names_sent,
+                "schema_count": len(_tool_names_sent),
+                "round": round_num,
+            })
+        except Exception:
+            pass
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never

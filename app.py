@@ -573,6 +573,8 @@ app.include_router(setup_preset_routes(preset_manager))
 # Diagnostics
 from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler))
+from routes.inspector_routes import setup_inspector_routes
+app.include_router(setup_inspector_routes())
 
 # Cleanup
 from routes.cleanup_routes import setup_cleanup_routes

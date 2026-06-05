@@ -42,6 +42,12 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     """
     # Create directories first
     create_directories()
+    try:
+        from src.debug_trace import startup_cleanup as _inspector_trace_cleanup
+        _inspector_trace_cleanup()
+        logger.info("Inspector traces cleaned at startup")
+    except Exception as e:
+        logger.warning("Inspector trace cleanup skipped: %s", e)
 
     # Initialize core managers
     memory_manager = MemoryManager(DATA_DIR)

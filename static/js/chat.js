@@ -956,21 +956,21 @@ import createResearchSynapse from './researchSynapse.js';
       });
       
       if (!res.ok) {
-        clearResponseTimeout();
-        if (res.status === 404) {
-          // Session was deleted (e.g. by AI) — reload and go to welcome
-          holder.remove();
-          if (sessionModule) await sessionModule.loadSessions();
-          return;
-        }
         let errText = `Error ${res.status}`;
         try {
           const errBody = await res.text();
           // Parse nested JSON error if present
-          const m = errBody.match(/"message"\s*:\s*"([^"]+)"/);
+          const m = errBody.match(/"message"\s*:\s*"([^"]+)"/) || errBody.match(/"detail"\s*:\s*"([^"]+)"/);
           if (m) errText = m[1].replace(/\\"/g, '"');
           else if (errBody.length < 200) errText = errBody;
         } catch {}
+        if (res.status === 404) {
+          // Older behavior silently removed the bubble because 404 usually
+          // meant the session was deleted. That made stale-session/model-route
+          // failures look like "the model never answered". Surface the reason.
+          if (sessionModule) await sessionModule.loadSessions();
+          throw new Error(errText || 'Session or model route not found');
+        }
         // Auto-switch to chat mode for tool-related errors
         if (errText.includes('tool') || errText.includes('auto')) {
           errText = 'This model doesn\'t support agent tools — switched to Chat mode. Try again.';

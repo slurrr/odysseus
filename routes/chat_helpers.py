@@ -12,6 +12,7 @@ from core.models import ChatMessage
 from core.database import SessionLocal
 from core.database import Session as DBSession, ModelEndpoint
 from src.llm_core import normalize_model_id
+from src.model_context import estimate_tokens
 from src.endpoint_resolver import normalize_base
 from src.context_compactor import maybe_compact, trim_for_context
 from src.auth_helpers import get_current_user
@@ -129,6 +130,29 @@ def needs_auto_name(name: str) -> bool:
 async def auto_name_session(session_manager, sess):
     """Generate a short title for a session from its first user message."""
     try:
+        from src import debug_trace as _trace
+    except Exception:
+        _trace = None
+    _parent_trace_id = None
+    if _trace is not None:
+        try:
+            _parent_trace_id = _trace.current_trace_id()
+            # Background tasks inherit contextvars from the user turn that
+            # scheduled them. Give auto-name its own trace so its provider
+            # payload never overwrites the user's chat trace.
+            _trace.begin_trace(
+                getattr(sess, "id", ""),
+                mode="internal",
+                owner=getattr(sess, "owner", None),
+                incognito=(getattr(sess, "owner", None) or "").strip().lower() == "nobody",
+                trace_type="internal:auto_name",
+                label="Auto-name chat",
+                parent_trace_id=_parent_trace_id,
+            )
+            _trace.add_event("auto_name_started", {"session_name": getattr(sess, "name", "")})
+        except Exception:
+            pass
+    try:
         from src.llm_core import llm_call_async
         from src.task_endpoint import resolve_task_endpoint
 
@@ -146,14 +170,23 @@ async def auto_name_session(session_manager, sess):
                 break
 
         if not first_msg:
+            if _trace is not None:
+                _trace.set_result({"renamed": False, "reason": "no_first_user_message"})
+                _trace.finish_trace("skipped")
             return
 
         owner = getattr(sess, "owner", None)
         t_url, t_model, t_headers = resolve_task_endpoint(
             sess.endpoint_url, sess.model, sess.headers, owner=owner,
         )
+        if _trace is not None:
+            _trace.set_endpoint({"url": t_url, "model": t_model})
+            _trace.add_event("auto_name_endpoint_resolved", {"url": t_url, "model": t_model})
         if not t_model:
             logger.debug("[auto-name] No model provided, skipping")
+            if _trace is not None:
+                _trace.set_result({"renamed": False, "reason": "no_model"})
+                _trace.finish_trace("skipped")
             return
 
         # max_tokens big enough that reasoning models (Minimax M2,
@@ -181,11 +214,31 @@ async def auto_name_session(session_manager, sess):
         title = strip_think(title, prose=False, prompt_echo=False)
         if title and len(title) < 80:
             session_manager.update_session_name(sess.id, title)
+            if _trace is not None:
+                _trace.set_result({"renamed": True, "title": title})
+                _trace.add_event("auto_name_applied", {"title": title})
+                _trace.finish_trace("done")
             logger.info(f"Auto-named session {sess.id}: {title}")
+        else:
+            if _trace is not None:
+                _trace.set_result({"renamed": False, "reason": "empty_or_too_long_title", "raw_title": title})
+                _trace.finish_trace("skipped")
 
     except Exception as e:
+        if _trace is not None:
+            try:
+                _trace.set_result({"renamed": False, "error": str(e)})
+                _trace.finish_trace("error")
+            except Exception:
+                pass
         import traceback
         logger.error(f"Auto-name failed for {sess.id}: {e}\n{traceback.format_exc()}")
+    finally:
+        if _trace is not None:
+            try:
+                _trace.set_current_trace(None)
+            except Exception:
+                pass
 
 
 def try_fallback_endpoint(sess, session_id: str) -> dict | None:
@@ -517,6 +570,42 @@ async def build_chat_context(
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
 
+    try:
+        from src import debug_trace as _trace
+        _trace.set_preset({
+            "preset_id": preset_id or "",
+            "character_name": preset.character_name or "",
+            "temperature": preset.temperature,
+            "max_tokens": preset.max_tokens,
+            "has_system_prompt": bool(preset.system_prompt),
+        })
+        _trace.set_endpoint({
+            "url": getattr(sess, "endpoint_url", "") or "",
+            "model": getattr(sess, "model", "") or "",
+        })
+        for i, msg in enumerate(preface):
+            name = "Context preface"
+            content = str(msg.get("content", ""))
+            if msg.get("role") == "system" and i == 0 and preset.system_prompt:
+                name = "Preset / persona system prompt"
+            elif msg.get("role") == "system" and "Prompt-safety policy" in content:
+                name = "Prompt safety policy"
+            elif "Source: saved memory" in content:
+                name = "Memory context"
+            elif "Source: retrieved documents" in content:
+                name = "RAG documents"
+            elif "Source: web search results" in content:
+                name = "Web search results"
+            elif "Source: web page:" in content:
+                name = "Fetched web page"
+            elif "Source: youtube transcript" in content:
+                name = "YouTube transcript"
+            elif "Source: available skills" in content or "Source: skills" in content:
+                name = "Skills context"
+            _trace.add_layer(_trace.layer_from_message(name, msg, source="routes/chat_helpers.build_chat_context"))
+    except Exception:
+        pass
+
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])
 
@@ -538,10 +627,30 @@ async def build_chat_context(
     messages = preface + sess.get_context_messages()
 
     # Auto-compact
+    _tokens_before_compaction = estimate_tokens(messages)
     messages, context_length, was_compacted = await maybe_compact(
         sess, sess.endpoint_url, sess.model, messages, sess.headers,
     )
+    _tokens_after_compaction = estimate_tokens(messages)
+    _before_trim_count = len(messages)
+    _tokens_before_trim = _tokens_after_compaction
     messages = trim_for_context(messages, context_length)
+    _tokens_after_trim = estimate_tokens(messages)
+    try:
+        from src import debug_trace as _trace
+        _trace.set_context({
+            "context_length": context_length,
+            "tokens_before_compaction": _tokens_before_compaction,
+            "compacted": bool(was_compacted),
+            "tokens_after_compaction": _tokens_after_compaction,
+            "tokens_before_trim": _tokens_before_trim,
+            "tokens_after_trim": _tokens_after_trim,
+            "trimmed": _tokens_after_trim < _tokens_before_trim or len(messages) < _before_trim_count,
+            "messages_after_trim": len(messages),
+        })
+        _trace.set_final_messages(messages, label="messages_after_context")
+    except Exception:
+        pass
 
     return ChatContext(
         preface=preface,

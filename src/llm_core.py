@@ -1088,6 +1088,23 @@ async def llm_call_async(
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
 
+    try:
+        from src import debug_trace as _trace
+        _trace.set_provider_payload({
+            "provider": provider,
+            "target_url": target_url,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "message_count": len(messages_copy),
+            "tools_count": 0,
+            "payload": payload,
+        })
+        _trace.set_final_messages(messages_copy, label="provider_messages")
+    except Exception:
+        pass
+
     if _is_host_dead(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
 
@@ -1123,6 +1140,15 @@ async def llm_call_async(
                     msg = data["choices"][0]["message"]
                     response = msg.get("content") or msg.get("reasoning_content") or ""
                 _set_cached_response(cache_key, response)
+                try:
+                    from src import debug_trace as _trace
+                    _trace.set_result({
+                        "response": response,
+                        "response_chars": len(response or ""),
+                        "response_preview": (response or "")[:500],
+                    })
+                except Exception:
+                    pass
                 return response
             except Exception:
                 raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
@@ -1205,6 +1231,48 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             from src.copilot import apply_request_headers
             apply_request_headers(h, messages_copy)
 
+    _out_text: List[str] = []
+    _out_reasoning: List[str] = []
+
+    def _trace_stream_result(status: str = "done", error: Optional[str] = None) -> None:
+        try:
+            from src import debug_trace as _trace
+            text = "".join(_out_text)
+            reasoning = "".join(_out_reasoning)
+            info = {
+                "stream_status": status,
+                "response": text,
+                "response_chars": len(text),
+                "response_preview": text[:500],
+                "reasoning": reasoning,
+                "reasoning_chars": len(reasoning),
+                "reasoning_preview": reasoning[:500],
+            }
+            if error:
+                info["error"] = error
+            _trace.set_result(info)
+        except Exception:
+            pass
+
+    try:
+        from src import debug_trace as _trace
+        _tool_names = [t.get("function", {}).get("name") for t in (tools or []) if isinstance(t, dict)]
+        _trace.set_provider_payload({
+            "provider": provider,
+            "target_url": target_url,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "message_count": len(messages_copy),
+            "tools_count": len(tools or []),
+            "tool_names": [n for n in _tool_names if n],
+            "payload": payload,
+        })
+        _trace.set_final_messages(messages_copy, label="provider_messages")
+    except Exception:
+        pass
+
     # Short connect timeout: a reachable peer answers SYN in <100ms even on
     # Tailscale. 3s is plenty; 30s let one dead upstream wedge the UI.
     stream_timeout = httpx.Timeout(connect=3.0, read=float(timeout), write=30.0, pool=5.0)
@@ -1236,9 +1304,11 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     message = j.get("message") or {}
                     thinking = message.get("thinking") or ""
                     if thinking:
+                        _out_reasoning.append(thinking)
                         yield f'data: {json.dumps({"delta": thinking, "thinking": True})}\n\n'
                     content = message.get("content") or ""
                     if content:
+                        _out_text.append(content)
                         yield f'data: {json.dumps({"delta": content})}\n\n'
                     for tc in message.get("tool_calls") or []:
                         fn = tc.get("function") or {}
@@ -1253,20 +1323,26 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                             yield f'data: {json.dumps({"type": "tool_calls", "calls": _ollama_tool_calls})}\n\n'
                         if j.get("prompt_eval_count") is not None or j.get("eval_count") is not None:
                             yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": j.get("prompt_eval_count", 0), "output_tokens": j.get("eval_count", 0)}})}\n\n'
+                        _trace_stream_result("done")
                         yield "data: [DONE]\n\n"
                         return
+                _trace_stream_result("done")
                 yield "data: [DONE]\n\n"
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Ollama stream connect to {target_url} failed: {e}{_tail}")
+            _trace_stream_result("error", f"Cannot reach {_host_key(target_url)}")
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
+            _trace_stream_result("error", "Read timeout")
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.NetworkError:
+            _trace_stream_result("error", "Network error")
             yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
         except Exception as e:
             logger.error(f"Ollama stream error: {e}")
+            _trace_stream_result("error", str(e))
             yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
         return
 
@@ -1316,6 +1392,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                             if delta_type == "text_delta":
                                 text = delta.get("text") or ""
                                 if text:
+                                    _out_text.append(text)
                                     yield f'data: {json.dumps({"delta": text})}\n\n'
                             elif delta_type == "input_json_delta":
                                 # Accumulate tool arguments JSON
@@ -1354,26 +1431,33 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                 yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                             if _anth_input_tokens or _anth_output_tokens:
                                 yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
+                            _trace_stream_result("done")
                             yield "data: [DONE]\n\n"
                             return
                         elif evt == "error":
                             err_msg = j.get("error", {}).get("message", "Unknown error")
+                            _trace_stream_result("error", err_msg)
                             yield f'event: error\ndata: {json.dumps({"error": err_msg, "status": 400})}\n\n'
                             return
                     except json.JSONDecodeError:
                         continue
+                _trace_stream_result("done")
                 yield "data: [DONE]\n\n"
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
+            _trace_stream_result("error", f"Cannot reach {_host_key(target_url)}")
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
+            _trace_stream_result("error", "Read timeout")
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.NetworkError:
+            _trace_stream_result("error", "Network error")
             yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
         except Exception as e:
             logger.error(f"Anthropic stream error: {e}")
+            _trace_stream_result("error", str(e))
             yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
         return
 
@@ -1418,6 +1502,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         tc_event = _emit_tool_calls()
                         if tc_event:
                             yield tc_event
+                        _trace_stream_result("done")
                         yield "data: [DONE]\n\n"
                         return
 
@@ -1465,6 +1550,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1, Nemotron). vLLM 0.20.2 / NIM emit the field as `reasoning`; older builds use `reasoning_content`. Accept either.
                                         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                                         if reasoning:
+                                            _out_reasoning.append(reasoning)
                                             yield f'data: {json.dumps({"delta": reasoning, "thinking": True})}\n\n'
                                         content = delta.get("content") or ""
                                         if content:
@@ -1495,6 +1581,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                         yield f'data: {json.dumps({"delta": think_part, "thinking": True})}\n\n'
                                                     if regular_part:
                                                         _first_content_sent = True
+                                                        _out_text.append(regular_part)
                                                         yield f'data: {json.dumps({"delta": regular_part})}\n\n'
                                                 else:
                                                     # Still inside <think>: route to thinking channel
@@ -1514,6 +1601,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                 if _thinking_model and not _first_content_sent and stripped.lower().startswith("</think"):
                                                     content = "<think>" + content
                                                 _first_content_sent = True
+                                                _out_text.append(content)
                                                 yield f'data: {json.dumps({"delta": content})}\n\n'
                                         # Native tool calls — accumulate across chunks
                                         for tc in delta.get("tool_calls") or []:
@@ -1563,9 +1651,11 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                     yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
                                 elif "text" in j:
                                     if j["text"]:
+                                        _out_text.append(j["text"])
                                         yield f'data: {json.dumps({"delta": j["text"]})}\n\n'
                             else:
                                 if data.strip():
+                                    _out_text.append(data)
                                     yield f'data: {json.dumps({"delta": data})}\n\n'
                     except Exception as e:
                         logger.error(f"Error parsing stream data: {e}")
@@ -1575,19 +1665,24 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tc_event = _emit_tool_calls()
             if tc_event:
                 yield tc_event
+            _trace_stream_result("done")
             yield "data: [DONE]\n\n"
 
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         _cooled = _mark_host_dead(target_url)
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
         logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
+        _trace_stream_result("error", f"Cannot reach {_host_key(target_url)}")
         yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
     except httpx.ReadTimeout:
+        _trace_stream_result("error", "Read timeout")
         yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
     except httpx.NetworkError:
+        _trace_stream_result("error", "Network error")
         yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
     except Exception as e:
         logger.error(f"Stream error: {e}")
+        _trace_stream_result("error", str(e))
         yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
 
 
