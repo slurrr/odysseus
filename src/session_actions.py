@@ -8,7 +8,7 @@ and the task scheduler / builtin actions system.
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,11 @@ _THROWAWAY_NAMES = {
     "ok", "lol", "bruh", "hmm", "hm", "meh",
 }
 _THROWAWAY_MAX_MESSAGES = 4
+# Event-triggered tidy can run immediately after a session is created, before
+# the chat stream has persisted the first user/assistant messages. Never delete
+# brand-new empty rows; otherwise a live chat can vanish while its request is
+# still in flight.
+_NEW_EMPTY_SESSION_GRACE = timedelta(minutes=10)
 
 
 async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
@@ -38,6 +43,18 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
     from core.database import SessionLocal, Session as DbSession, ChatMessage as DbMsg
     from src.llm_core import llm_call_async
     from src.task_endpoint import resolve_task_endpoint
+    try:
+        from src import debug_trace as _trace
+        _trace.begin_trace(
+            f"task:tidy_sessions:{owner or 'all'}",
+            mode="internal",
+            owner=owner,
+            trace_type="internal:tidy_sessions",
+            label="Tidy chats",
+        )
+        _trace.add_event("tidy_started", {"owner": owner or "", "skip_llm": bool(skip_llm)})
+    except Exception:
+        _trace = None
 
     db = SessionLocal()
     try:
@@ -49,22 +66,43 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
             DbSession.archived == False,
             *([DbSession.owner == owner] if owner else []),
         ).all()
+        if _trace is not None:
+            _trace.add_event("tidy_scanned", {"count": len(rows)})
 
         for row in rows:
             if getattr(row, 'is_important', False):
+                if _trace is not None:
+                    _trace.add_event("tidy_kept", {"session_id": row.id, "name": row.name or "", "reason": "important"})
                 continue
             if (row.name or "").strip() == "Incognito":
                 deleted_throwaway += 1
+                if _trace is not None:
+                    _trace.add_event("tidy_delete_candidate", {"session_id": row.id, "name": row.name or "", "reason": "incognito"})
                 db.delete(row)
                 continue
+
+            reason = ""
 
             msg_count = db.query(DbMsg.id).filter(
                 DbMsg.session_id == row.id
             ).limit(_THROWAWAY_MAX_MESSAGES + 1).count()
+            created_at = getattr(row, "created_at", None)
+            age = (datetime.utcnow() - created_at.replace(tzinfo=None)) if created_at else None
+            if msg_count == 0 and age is not None and age < _NEW_EMPTY_SESSION_GRACE:
+                if _trace is not None:
+                    _trace.add_event("tidy_kept", {
+                        "session_id": row.id,
+                        "name": row.name or "",
+                        "message_count": msg_count,
+                        "reason": "new_empty_grace_period",
+                        "age_seconds": round(age.total_seconds(), 2),
+                    })
+                continue
             should_delete = False
 
             if msg_count == 0:
                 should_delete = True
+                reason = "empty"
                 deleted_empty += 1
             elif msg_count <= _THROWAWAY_MAX_MESSAGES:
                 name = (row.name or "").strip().lower()
@@ -78,13 +116,16 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
 
                 if name in _THROWAWAY_NAMES or name.startswith("chat:") or first_text in _THROWAWAY_NAMES:
                     should_delete = True
+                    reason = "throwaway_name_or_first_message"
                     deleted_throwaway += 1
                 elif msg_count == 1 and assistant_count == 0:
                     should_delete = True
+                    reason = "single_user_no_assistant"
                     deleted_throwaway += 1
                 elif msg_count <= 4 and first_text and len(first_text.split()) <= 8 and len(first_text) <= 80:
                     # Short trivial chats — e.g. "write hi to a friend" → "Hi!"
                     should_delete = True
+                    reason = "short_trivial_chat"
                     deleted_throwaway += 1
                 else:
                     # Aggressive: total message text under 250 chars combined = trivial
@@ -94,10 +135,25 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
                     total_chars = sum(len(m[0] or "") for m in msg_rows)
                     if total_chars <= 250:
                         should_delete = True
+                        reason = "small_total_text"
                         deleted_throwaway += 1
 
             if should_delete:
+                if _trace is not None:
+                    _trace.add_event("tidy_delete_candidate", {
+                        "session_id": row.id,
+                        "name": row.name or "",
+                        "message_count": msg_count,
+                        "reason": reason or "matched_cleanup_rule",
+                    })
                 db.delete(row)
+            elif _trace is not None:
+                _trace.add_event("tidy_kept", {
+                    "session_id": row.id,
+                    "name": row.name or "",
+                    "message_count": msg_count,
+                    "reason": "did_not_match_cleanup_rules",
+                })
 
         if deleted_empty or deleted_throwaway:
             db.commit()
@@ -120,15 +176,27 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
             })
 
         if len(session_list) < 2:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
+            result_msg = f"Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
+            if _trace is not None:
+                _trace.set_result({"message": result_msg, "deleted_empty": deleted_empty, "deleted_throwaway": deleted_throwaway, "remaining": len(session_list)})
+                _trace.finish_trace("done")
+            return result_msg
 
         # Background built-in sweep skips folder-sort to stay pure infra.
         if skip_llm:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions (folder sort skipped)."
+            result_msg = f"Cleaned {deleted_empty + deleted_throwaway} sessions (folder sort skipped)."
+            if _trace is not None:
+                _trace.set_result({"message": result_msg, "deleted_empty": deleted_empty, "deleted_throwaway": deleted_throwaway, "remaining": len(session_list), "folder_sort_skipped": True})
+                _trace.finish_trace("done")
+            return result_msg
 
         url, model, headers = resolve_task_endpoint()
         if not url:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No model endpoint available for sorting."
+            result_msg = f"Cleaned {deleted_empty + deleted_throwaway} sessions. No model endpoint available for sorting."
+            if _trace is not None:
+                _trace.set_result({"message": result_msg, "deleted_empty": deleted_empty, "deleted_throwaway": deleted_throwaway, "remaining": len(session_list), "folder_sort_skipped": True, "reason": "no_endpoint"})
+                _trace.finish_trace("done")
+            return result_msg
 
         names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
         prompt = (
@@ -150,7 +218,11 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
                                        temperature=0.3, max_tokens=16384, headers=headers, timeout=120)
         except Exception as e:
             logger.warning(f"Auto-sort LLM call failed: {e}")
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
+            result_msg = f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
+            if _trace is not None:
+                _trace.set_result({"message": result_msg, "deleted_empty": deleted_empty, "deleted_throwaway": deleted_throwaway, "remaining": len(session_list), "folder_sort_skipped": True, "error": str(e)})
+                _trace.finish_trace("done")
+            return result_msg
 
         # Parse JSON from response
         text = raw.strip()
@@ -175,11 +247,19 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
                 except json.JSONDecodeError:
                     pass
         if result is None:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. AI returned unparseable response."
+            result_msg = f"Cleaned {deleted_empty + deleted_throwaway} sessions. AI returned unparseable response."
+            if _trace is not None:
+                _trace.set_result({"message": result_msg, "deleted_empty": deleted_empty, "deleted_throwaway": deleted_throwaway, "remaining": len(session_list), "folder_sort_skipped": False, "reason": "unparseable_ai_response"})
+                _trace.finish_trace("done")
+            return result_msg
 
         folders = result.get("folders", {})
         if not folders:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No folder groupings found."
+            result_msg = f"Cleaned {deleted_empty + deleted_throwaway} sessions. No folder groupings found."
+            if _trace is not None:
+                _trace.set_result({"message": result_msg, "deleted_empty": deleted_empty, "deleted_throwaway": deleted_throwaway, "remaining": len(session_list), "folder_sort_skipped": False, "reason": "no_folder_groupings"})
+                _trace.finish_trace("done")
+            return result_msg
 
         # Apply assignments
         id_prefix_map = {s["id"][:8]: s["id"] for s in session_list}
@@ -207,7 +287,20 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
         db.commit()
 
         folder_summary = ", ".join(f"{k} ({len(v)})" for k, v in folders.items())
-        return f"Deleted {deleted_empty} empty + {deleted_throwaway} throwaway. Sorted {updated} sessions into: {folder_summary}"
+        result_msg = f"Deleted {deleted_empty} empty + {deleted_throwaway} throwaway. Sorted {updated} sessions into: {folder_summary}"
+        if _trace is not None:
+            _trace.set_result({"message": result_msg, "deleted_empty": deleted_empty, "deleted_throwaway": deleted_throwaway, "remaining": len(session_list), "sorted": updated, "folders": folders})
+            _trace.finish_trace("done")
+        return result_msg
+
+    except Exception as e:
+        if _trace is not None:
+            try:
+                _trace.set_result({"error": str(e)})
+                _trace.finish_trace("error")
+            except Exception:
+                pass
+        raise
 
     finally:
         db.close()

@@ -257,7 +257,7 @@ def setup_chat_routes(
 
         # Verify the caller owns this session before loading it.
         # Without this, any authenticated user can post into another user's chat.
-        _verify_session_owner(request, session)
+        _verify_session_owner(request, session, session_manager=session_manager)
 
         try:
             sess = session_manager.get_session(session)
@@ -285,6 +285,12 @@ def setup_chat_routes(
         memory_response = await chat_handler.handle_memory_command(sess, message)
         if memory_response:
             return {"response": memory_response}
+
+        try:
+            from src import debug_trace as _trace
+            _trace.begin_trace(session, mode="chat", owner=owner, incognito=False, trace_type="user_chat", label="User chat")
+        except Exception:
+            pass
 
         # Build shared context (preset, preprocess, preface, compact)
         ctx = await build_chat_context(
@@ -336,6 +342,11 @@ def setup_chat_routes(
             owner=ctx.user,
         )
 
+        try:
+            from src import debug_trace as _trace
+            _trace.finish_trace("done")
+        except Exception:
+            pass
         return {"response": reply}
 
     # ------------------------------------------------------------------ #
@@ -412,7 +423,7 @@ def setup_chat_routes(
             )
             # Verify ownership AFTER coerce (which may resolve a default session)
             # but BEFORE loading. Prevents cross-user session hijack.
-            _verify_session_owner(request, session)
+            _verify_session_owner(request, session, session_manager=session_manager)
             sess = session_manager.get_session(session)
             owner = get_current_user(request)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
@@ -469,6 +480,12 @@ def setup_chat_routes(
                 pass
 
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
+
+        try:
+            from src import debug_trace as _trace
+            _trace.begin_trace(session, mode=_effective_mode, owner=owner, incognito=incognito, trace_type="user_chat", label="User chat")
+        except Exception as e:
+            logger.debug("inspector begin_trace failed: %s", e)
 
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
@@ -1055,6 +1072,11 @@ def setup_chat_routes(
                 async for chunk in stream_with_save():
                     yield chunk
             finally:
+                try:
+                    from src import debug_trace as _trace
+                    _trace.finish_trace("done")
+                except Exception:
+                    pass
                 _active_streams.pop(session, None)
 
         # Run the stream as a DETACHED background task so it survives the client

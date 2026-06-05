@@ -8,5 +8,11 @@ Keep notes concise and operational:
 - exact commands/paths/ports
 - open bugs and next tests
 
+Key files:
+- `repo-map.md` — high-level repo/runtime map for fresh sessions and compactions.
+- `roadmap.md` — current local-dev priorities and watch items.
+- `poop-inspector-spec.md` — `/inspector` trace design, implementation status, and next refinements.
+- `system-prompt.md` / `tool-calling.md` — prompt/tool investigation notes.
+
 Subdirectories:
 - `serving/` — local model serving notes for vLLM, llama.cpp, endpoints, GPU/runtime issues.

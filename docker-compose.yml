@@ -8,6 +8,9 @@ services:
       # does not rebuild the image, so mount the code paths that the app
       # executes at runtime; otherwise route/static/script edits are ignored
       # until `docker compose build` is run.
+      - ./app.py:/app/app.py:z
+      - ./main.py:/app/main.py:z
+      - ./src:/app/src:z
       - ./routes:/app/routes:z
       - ./static:/app/static:z
       - ./scripts:/app/scripts:z
@@ -23,6 +26,13 @@ services:
       # FastEmbed's ONNX cache lives separately; persist it too so embeddings
       # don't redownload on container recreate.
       - ${FASTEMBED_CACHE_DIR:-/home/poop/models/fastembed}:/app/.cache/fastembed:z
+      # Read/write access to the workstation's full durable model tree for
+      # local GGUF/quants outside the HF cache. Add subdirectories from /models
+      # in Cookbook settings as needed (for example /models/local/quants).
+      - ${MODELS_DIR:-/home/poop/models}:/models:z
+      # Also mount at the original host path so existing absolute symlinks under
+      # /models/active that point at /home/poop/models/... resolve in-container.
+      - ${MODELS_DIR:-/home/poop/models}:/home/poop/models:z
       # Cookbook-installed Python CLIs/packages (vLLM, llama-cpp-python, etc.)
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
