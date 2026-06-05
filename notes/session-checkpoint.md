@@ -1,24 +1,39 @@
 # Current Goal
-Make Docker usage feel local by persisting app state and sharing one HF cache/model cache across container recreates.
+Tighten Odysseus local model serving, starting with llama.cpp/GGUF in Docker, and keep local contributor/agent notes under `poop/`.
 
 # Current State
-- `docker-compose.yml` now mounts a host HF cache at `/app/.cache/huggingface` and FastEmbed cache at `/app/.cache/fastembed`.
-- Container env now pins `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, and `FASTEMBED_CACHE_PATH` to those container paths.
-- Host cache dirs exist at `/home/poop/models/hf` and `/home/poop/models/fastembed`.
-- UI state already persists via `./data` mounts (`settings.json`, `cookbook_state.json`, DB, etc.).
-- HF token is stored and working from Cookbook state; downloads/dep discovery are fine.
-- GPU passthrough is working now.
-- vLLM failures are due to launch-shape differences, not the driver: first VRAM headroom, then Gemma4 multimodal profiling when the run is not text-only.
-- The working agentmux reference stack (`mem_gem_hs*`) uses `language_model_only = true`, `enable_prefix_caching = true`, `kv_cache_dtype = fp8_e4m3`, `chat_template_content_format = "openai"`, `--no-trust-request-chat-template`, and lower `gpu_memory_utilization`.
+- Native CUDA `llama-server` now builds inside the Odysseus container using pip-installed NVIDIA CUDA wheels from vLLM under `/app/.local/lib/python3.12/site-packages/nvidia/cu13`.
+- llama.cpp CUDA bootstrap fixes are in `routes/cookbook_helpers.py`: CUDA wheel compatibility symlinks, `CUDAToolkit_ROOT`, `LD_LIBRARY_PATH`, and `CCCL_DISABLE_CTK_COMPATIBILITY_CHECK`.
+- llama.cpp launch preflight fixes are in `routes/cookbook_routes.py`: CUDA wheel `LD_LIBRARY_PATH` is set even when an existing `llama-server` skips rebuild.
+- Added auto-registration in `routes/cookbook_routes.py` for OpenAI-compatible text serves (`llama-server`, `llama_cpp.server`, `vllm serve`, `sglang.launch_server`) so UI launches should create/update a `ModelEndpoint` without manual endpoint registration.
+- Manual verified working run used `serve-gemma31b-cuda` on port `8001`, CUDA0 RTX 4090, ~18 GiB VRAM, `/health`, `/v1/models`, and `/v1/chat/completions` OK.
+- User verified UI launch/session resume/model auto-registration are now solid.
+- Changed `static/js/cookbookRunning.js` so normal Stop keeps a stopped serve card for relaunch/edit instead of removing/tombstoning it; manual Remove still deletes the card.
+- Local notes scaffold expanded: `poop/README.md`, `poop/roadmap.md`, `poop/system-prompt.md`, `poop/tool-calling.md`, `poop/serving/README.md`, `poop/serving/llama-cpp.md`, `poop/serving/llama-cpp-runtime-hardening.md`, `poop/serving/voice-stt-tts.md`, `poop/serving/model-discovery-hwfit.md`, `poop/serving/deep-research.md`, `poop/integration-agent-session-srv.md`.
 
 # Decisions
-- Use Docker’s mounted volumes for persistence; do not rely on the UI to write `.env`.
-- Keep one shared HF cache on the host instead of per-container downloads.
-- Keep serve engines (`vllm`, `llama.cpp`) installed inside the container and persisted under `./data/local`.
+- Keep serving notes and repo forensics in `poop/` as local dev docs, not upstream docs yet.
+- Prefer native `llama-server` over `llama-cpp-python` for modern GGUF chat templates and CUDA offload.
+- Use `-c 4096` for the known-good Gemma 31B GGUF baseline; larger contexts need KV/cache tuning and should not fall back to CPU.
+- Text model serves should be auto-registered as OpenAI-compatible endpoints, same conceptual UX as manual endpoint registration.
 
 # Open Problems
-- Need to port the known-good Gemma4 vLLM launch shape into Odysseus (especially `language_model_only`, fp8 KV cache, and conservative GPU utilization).
-- Speculative decoding with Gemma4 remains coupled to the text-only launch shape and assistant draft model from the agentmux stack.
+- Cookbook Running/servable state could still use a clearer design: ephemeral live tasks vs durable serve presets/history. Current practical combo is saveable Serve recipes + stopped cards.
+- Roadmap order updated: runtime baseline → instruction stack → tool calling → Deep Research → voice → hwfit → agent-session-srv/pi integration.
+- Need map system prompt / instruction stack: global, session, agent, research, compare, memory/skills, tool harness.
+- Need map tool calling / structured output: schemas, parsing, retry/repair, local-model-friendly reduced tool mode.
+- Need investigate voice endpoint mode with user's existing faster-whisper/Kokoro HTTP servers.
+- Need investigate hwfit/model discovery because manual 24GB CUDA override may not filter recommendations as expected.
+- Need inspect Deep Research endpoint/model fallback so single-GPU local runs use current/default llama.cpp endpoint instead of unexplained defaults.
+- Need explore feasibility of `agent-session-srv` / pi / pi-collab integration after session schema is mapped.
+- Continuing an old chat after relaunch can fail while fresh chat works; likely stale endpoint id/model id mismatch (`repo_id` vs GGUF basename) or cached endpoint metadata.
+- `/api/models` cache may take up to 30s to reflect auto-registered endpoints; may need explicit invalidation or probe after auto-register.
 
 # Resume Instructions
-Compare the current Odysseus serve command against `/home/poop/code/dev/agentmux/mux/lab/mem_gem_e4b_hindsight.toml` and `/home/poop/code/dev/agentmux/mux/lab/mem_gem_e4b_hindsight_external.toml`. The key delta to port is `language_model_only = true` (plus the fp8 KV cache / prefix cache / chat template flags). If you want the exact next step, make an Odysseus preset or command that mirrors that stack and retry with `--gpu-memory-utilization 0.8`.
+1. For runtime, keep validating llama.cpp baseline and note any KV/cache/concurrency changes; see `poop/serving/llama-cpp-runtime-hardening.md`.
+2. For system prompt, map instruction injection paths in `src/llm_core.py`, `src/chat_handler.py`, `src/chat_processor.py`, `src/agent_loop.py`, `src/tool_schemas.py`, and `src/deep_research.py`; see `poop/system-prompt.md`.
+3. For tool calling, inspect `src/agent_loop.py`, `src/tool_schemas.py`, `src/tool_implementations.py`, `src/tool_index.py` and identify whether calls use native OpenAI tools, custom JSON, or parser repair; see `poop/tool-calling.md`.
+4. For Deep Research, inspect `routes/research_routes.py` endpoint/model resolution and make blank research settings fall back to current/default chat endpoint if needed.
+5. For voice, list existing ModelEndpoints and settings, then test whether external faster-whisper/Kokoro servers expose OpenAI-compatible `/audio/transcriptions` and `/audio/speech` paths; see `poop/serving/voice-stt-tts.md`.
+6. For hwfit, capture `/api/hwfit/system?fresh=true` and `/api/hwfit/models?...manual 24GB...` responses and compare frontend params; see `poop/serving/model-discovery-hwfit.md`.
+7. For integration, map session/fork storage in `routes/session_routes.py`, `src/session_manager.py`, and `data/sessions.json`; see `poop/integration-agent-session-srv.md`.
