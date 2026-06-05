@@ -9,6 +9,8 @@ Keep notes concise and operational:
 - open bugs and next tests
 
 Key files:
+- `git-workflow.md` — procedure for keeping `main` as an upstream mirror while carrying `local/dev` hacks.
+- `docker-ops.md` — how to restart/rebuild/manage the Docker Compose stack after edits or syncs.
 - `repo-map.md` — high-level repo/runtime map for fresh sessions and compactions.
 - `roadmap.md` — current local-dev priorities and watch items.
 - `poop-inspector-spec.md` — `/inspector` trace design, implementation status, and next refinements.
