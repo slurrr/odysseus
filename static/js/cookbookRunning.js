@@ -2205,9 +2205,14 @@ export function _renderRunningTab() {
           body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
         });
       } catch {}
-      // ...then smoothly fade/slide the card out and auto-remove it — no manual
-      // ⋮ → Remove needed.
-      _animateOutThenRemove(el, task.sessionId);
+      // Keep serve cards after a normal Stop so users can relaunch/edit the
+      // known-good command. Manual ⋮ → Remove still dismisses/tombstones the
+      // card. This matches crash/clean-exit behavior, where historical serve
+      // cards remain available for retry.
+      _updateTask(task.sessionId, { status: 'stopped', _userStopped: true });
+      el.dataset.status = 'stopped';
+      if (badge) { badge.textContent = _statusLabel('stopped', task.type); badge.className = 'cookbook-task-status cookbook-task-stopped'; }
+      _renderRunningTab();
     });
 
     // Wire kill

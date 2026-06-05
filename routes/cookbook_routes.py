@@ -756,23 +756,80 @@ def setup_cookbook_routes() -> APIRouter:
 
         return {"models": models, "host": host or "local"}
 
-    def _auto_register_image_endpoint(req: ServeRequest, remote: str | None) -> str | None:
-        """Register a diffusion model as an image endpoint so it appears in the model selector."""
-        import re
-        from core.database import SessionLocal, ModelEndpoint
-
-        # Parse port from command (--port NNNN), default 8100 for diffusion_server
+    def _serve_base_url(req: ServeRequest, remote: str | None, default_port: int) -> str:
+        """Build the API base URL for a Cookbook-launched server."""
         port_match = re.search(r'--port\s+(\d+)', req.cmd)
-        port = int(port_match.group(1)) if port_match else 8100
-
-        # Determine host
+        port = int(port_match.group(1)) if port_match else default_port
         if remote:
-            # SSH alias — use as hostname (Tailscale resolves it later)
             host = remote.split("@")[-1] if "@" in remote else remote
         else:
+            # Local Cookbook serves run inside the Odysseus container, so the
+            # backend should talk to container-local localhost (not host.docker).
             host = "localhost"
+        return f"http://{host}:{port}/v1"
 
-        base_url = f"http://{host}:{port}/v1"
+    def _auto_register_openai_endpoint(req: ServeRequest, remote: str | None) -> str | None:
+        """Register OpenAI-compatible text serves so launched models appear in chat.
+
+        Cookbook starts vLLM/SGLang/llama.cpp but historically only diffusion
+        auto-created a ModelEndpoint. That left llama.cpp launches running but
+        invisible until the user manually registered ``http://localhost:PORT/v1``.
+        We seed the expected model id immediately; normal endpoint refresh/probe
+        will correct it once the server is fully ready.
+        """
+        from core.database import SessionLocal, ModelEndpoint
+
+        if not any(marker in req.cmd for marker in ("llama-server", "llama_cpp.server", "vllm serve", "sglang.launch_server")):
+            return None
+
+        base_url = _serve_base_url(req, remote, 8000)
+        short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
+        model_id = req.repo_id
+        gguf_match = re.search(r"([^'\"\s]+\.gguf)", req.cmd)
+        if gguf_match:
+            model_id = Path(gguf_match.group(1)).name
+        elif "llama" in req.cmd and short_name:
+            model_id = short_name
+
+        db = SessionLocal()
+        try:
+            existing = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base_url).first()
+            if existing:
+                existing.is_enabled = True
+                existing.model_type = "llm"
+                existing.name = short_name or existing.name
+                existing.cached_models = json.dumps([model_id]) if model_id else existing.cached_models
+                db.commit()
+                logger.info("Updated existing text endpoint: %s", base_url)
+                return existing.id
+
+            ep_id = f"llm-{uuid.uuid4().hex[:8]}"
+            ep = ModelEndpoint(
+                id=ep_id,
+                name=short_name or base_url,
+                base_url=base_url,
+                api_key=None,
+                is_enabled=True,
+                model_type="llm",
+                cached_models=json.dumps([model_id]) if model_id else None,
+                supports_tools=None,
+            )
+            db.add(ep)
+            db.commit()
+            logger.info("Auto-registered text endpoint: %s @ %s", short_name, base_url)
+            return ep_id
+        except Exception as e:
+            logger.error("Failed to auto-register text endpoint: %s", e)
+            db.rollback()
+            return None
+        finally:
+            db.close()
+
+    def _auto_register_image_endpoint(req: ServeRequest, remote: str | None) -> str | None:
+        """Register a diffusion model as an image endpoint so it appears in the model selector."""
+        from core.database import SessionLocal, ModelEndpoint
+
+        base_url = _serve_base_url(req, remote, 8100)
 
         # Friendly display name from repo_id
         short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
@@ -1221,11 +1278,14 @@ def setup_cookbook_routes() -> APIRouter:
                 stderr = (await proc.stderr.read()).decode(errors="replace")
                 return {"ok": False, "error": stderr, "session_id": session_id}
 
-        # Auto-register as model endpoint if serving a diffusion model
+        # Auto-register as model endpoint so a successful Cookbook serve appears
+        # in the chat/image model selectors without a separate manual endpoint add.
         endpoint_id = None
         is_diffusion = "diffusion_server.py" in req.cmd
         if is_diffusion:
             endpoint_id = _auto_register_image_endpoint(req, remote)
+        else:
+            endpoint_id = _auto_register_openai_endpoint(req, remote)
 
         # Log to assistant
         try:
