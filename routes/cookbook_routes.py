@@ -957,6 +957,16 @@ def setup_cookbook_routes() -> APIRouter:
 
         short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
         display_name = short_name or "Local model"
+        # Seed the model picker immediately. Background /v1/models refresh can
+        # refine this later, but the picker should not go empty/offline-only just
+        # because a newly launched server has not been probed yet. For GGUF
+        # serves, llama.cpp exposes the file basename as the OpenAI model id.
+        model_id = req.repo_id
+        gguf_match = re.search(r"([^'\"\s]+\.gguf)", req.cmd)
+        if gguf_match:
+            model_id = Path(gguf_match.group(1)).name
+        elif "llama" in req.cmd and short_name:
+            model_id = short_name
 
         # If the serve command opts models into OpenAI tool-calling, record it so
         # agent_loop trusts emitted tool_calls instead of the name heuristic.
@@ -970,6 +980,8 @@ def setup_cookbook_routes() -> APIRouter:
                 existing.is_enabled = True
                 existing.model_type = "llm"
                 existing.name = display_name
+                if model_id:
+                    existing.cached_models = json.dumps([model_id])
                 if supports_tools is not None:
                     existing.supports_tools = supports_tools
                 db.commit()
@@ -984,6 +996,7 @@ def setup_cookbook_routes() -> APIRouter:
                 api_key=None,
                 is_enabled=True,
                 model_type="llm",
+                cached_models=json.dumps([model_id]) if model_id else None,
                 supports_tools=supports_tools,
             )
             db.add(ep)

@@ -177,6 +177,54 @@ docker compose -p odysseus-dev up -d
 
 But this repo's compose file publishes fixed localhost ports (`7000`, `8080`, `8091`, `8100`), so a second stack needs port edits or overrides.
 
+## VPN notes
+
+Docker published ports are not always pure loopback in practice. A browser request to:
+
+```text
+http://127.0.0.1:7000
+```
+
+is forwarded by Docker from the host into the container bridge network, e.g. `172.18.0.0/16`. VPN kill-switch / “block local network” modes can block that private bridge traffic, causing browser/curl failures even while the app is healthy inside the container.
+
+Observed with Mullvad:
+
+```text
+mullvad status = Connected
+mullvad lan get = Local network sharing setting: block
+```
+
+Symptom:
+
+```bash
+curl http://127.0.0.1:7000/
+# Recv failure: Connection reset by peer
+
+docker compose exec odysseus curl http://127.0.0.1:7000/
+# works inside the container
+```
+
+Fix for Mullvad while using local Docker containers:
+
+```bash
+mullvad lan set allow
+```
+
+Revert later if desired:
+
+```bash
+mullvad lan set block
+```
+
+If ports still fail after enabling local network sharing:
+
+```bash
+docker compose restart odysseus
+# or, if Docker's networking is wedged, turn VPN off, restart Docker/Compose, then turn VPN on with LAN sharing allowed
+```
+
+Do not use `docker compose down --volumes` for VPN issues.
+
 ## Quick recovery commands
 
 Restart app only:
