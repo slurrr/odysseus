@@ -544,7 +544,10 @@ function _serveOutputLooksReady(task) {
   const out = String(task?.output || '');
   return !!task?._serveReady
     || /Application startup complete/i.test(out)
+    || /Uvicorn running on\s+https?:\/\//i.test(out)
     || /Ollama API ready on port\s+\d+/i.test(out)
+    || /llama_server:\s+server is listening on\s+https?:\/\//i.test(out)
+    || /server is listening on\s+https?:\/\/[^\s]+/i.test(out)
     || /(?:GET|POST)\s+\/[^\s]*\s+HTTP\/[\d.]+"\s*2\d\d/i.test(out);
 }
 
@@ -570,8 +573,18 @@ function _normalizeTaskForDisplay(task) {
     }
     return task;
   }
-  if (task.type === 'serve' && task.status === 'done' && !_serveOutputLooksReady(task)) {
-    return { ...task, status: 'error' };
+  if (task.type === 'serve') {
+    const ready = _serveOutputLooksReady(task);
+    if (task.status === 'done' && !ready) {
+      return { ...task, status: 'error' };
+    }
+    // Older/fast-starting llama.cpp serves can have a valid "server is
+    // listening" marker but still be saved as error/crashed if the monitor did
+    // not recognize the readiness line. Show them as running; the process/port
+    // probe will mark them unreachable if they are actually gone.
+    if ((task.status === 'error' || task.status === 'crashed') && ready) {
+      return { ...task, status: 'running', _serveReady: true, _unreachable: false };
+    }
   }
   return task;
 }
