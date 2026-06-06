@@ -1574,6 +1574,10 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
     // with these precise settings (not just the last-used-for-repo state).
     const payload = { repo_id: repo, remote_host: _host || undefined, ssh_port: _sp || undefined, _cmd: cmd, _fields: fields || undefined, _env: _usedEnv, _envPath: _usedEnvPath, _gpus: _usedGpus, log_path: data.log_path || undefined };
     _addTask(data.session_id, shortName, 'serve', payload);
+    // The backend auto-registers Cookbook serves as endpoints immediately.
+    // Force-refresh the model cache so newly launched llama.cpp/vLLM/SGLang
+    // models appear in the picker without waiting for TTLs or a full reload.
+    _refreshModelsAfterEndpointChange();
     uiModule.showToast(`Serving ${shortName}...`);
   } catch (e) {
     uiModule.showToast('Failed: ' + e.message);

@@ -178,7 +178,8 @@ export async function refreshModels(force = false) {
     _loadingSpinner.start();
     try {
       if (!_fetchInflight) {
-        _fetchInflight = fetch(`${API_BASE}/api/models`, { credentials: 'same-origin' })
+        const modelsUrl = `${API_BASE}/api/models${force ? '?refresh=true' : ''}`;
+        _fetchInflight = fetch(modelsUrl, { credentials: 'same-origin' })
           .then(async (res) => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return res.json();
