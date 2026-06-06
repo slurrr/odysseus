@@ -944,15 +944,14 @@ def setup_cookbook_routes() -> APIRouter:
             port = 8080  # llama.cpp's llama-server default — the Apple Silicon path
 
         # Determine host (mirrors the image path: SSH alias for remote serves).
-        # For local serves while Odysseus runs inside Docker, "localhost"
-        # resolves to the container itself — useless. Use host.docker.internal
-        # which compose maps to the actual host, matching what /setup adds
-        # for Ollama by hand.
+        # Local Cookbook serves are launched by the Odysseus container itself
+        # via tmux, so the backend/model picker must talk to container-local
+        # localhost. host.docker.internal is only for model servers running on
+        # the Docker host outside this container.
         if remote:
             host = remote.split("@")[-1] if "@" in remote else remote
         else:
-            from routes.model_routes import _docker_host_gateway_reachable
-            host = "host.docker.internal" if _docker_host_gateway_reachable() else "localhost"
+            host = "localhost"
 
         base_url = f"http://{host}:{port}/v1"
 
