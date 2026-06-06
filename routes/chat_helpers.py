@@ -194,13 +194,28 @@ async def auto_name_session(session_manager, sess):
         # plus the actual title — 200 used to clip them mid-reasoning
         # so strip_think left an empty string and no rename happened.
         # Timeout matches: 60s gives slow local reasoners room to finish.
+        _title_messages = [
+            {"role": "system", "content": "Generate a short title (3-6 words, no quotes) for a conversation that starts with this message. Reply with ONLY the title, nothing else. Do NOT include any thinking, reasoning, or explanation — just the title."},
+            {"role": "user", "content": first_msg},
+        ]
+        if _trace is not None:
+            try:
+                # Make the auto-title prompt visible even before/independent of
+                # the lower-level provider snapshot. This is an internal prompt
+                # layer, not part of the user's chat turn.
+                for _i, _msg in enumerate(_title_messages):
+                    _trace.add_layer(_trace.layer_from_message(
+                        "Auto-name system prompt" if _msg.get("role") == "system" else "Auto-name source message",
+                        _msg,
+                        source="routes/chat_helpers.auto_name_session",
+                    ))
+                _trace.set_final_messages(_title_messages, label="auto_name_messages")
+            except Exception:
+                pass
         title = await llm_call_async(
             t_url,
             t_model,
-            [
-                {"role": "system", "content": "Generate a short title (3-6 words, no quotes) for a conversation that starts with this message. Reply with ONLY the title, nothing else. Do NOT include any thinking, reasoning, or explanation — just the title."},
-                {"role": "user", "content": first_msg},
-            ],
+            _title_messages,
             temperature=0.3,
             max_tokens=4096,
             headers=t_headers,

@@ -123,7 +123,7 @@ function renderTools() {
     <div><b>Disabled by UI/global</b><br>${chips(x.disabled_tools)}</div>
     <div><b>Relevant tools</b><br>${chips(x.relevant_tools)}</div>
     <div><b>Sent tools</b><br>${chips(x.sent_tool_names)}</div>
-    <div><b>Tool events</b>${(x.events || []).map(e => `<div class="insp-card"><b>${esc(e.tool || e.type || 'event')}</b><div class="insp-muted">${esc(e.status || e.message || '')}</div></div>`).join('') || '<div class="insp-muted">none</div>'}</div>
+    <div><b>Tool events</b>${(x.events || []).map(e => `<div class="insp-card"><b>${esc(e.tool || e.type || 'event')}</b><div class="insp-muted">round ${esc(e.round ?? '')} · ${esc(e.command || '')} · exit ${esc(e.exit_code ?? '')}</div><div>${esc(e.output || e.message || e.status || '')}</div>${e.doc_id ? `<div class="insp-muted">doc: ${esc(e.doc_title || e.doc_id)}</div>` : ''}</div>`).join('') || '<div class="insp-muted">none</div>'}</div>
   </div>`;
 }
 function renderContext() {

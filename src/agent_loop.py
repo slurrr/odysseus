@@ -986,6 +986,34 @@ def _build_system_prompt(
     if _skills_message:
         merged.insert(last_user_idx, _skills_message)
 
+    try:
+        from src import debug_trace as _trace
+        _trace.add_layer(_trace.layer_from_message(
+            "Agent system prompt",
+            {"role": "system", "content": agent_prompt},
+            source="src.agent_loop.build_agent_prompt",
+        ))
+        if _doc_message:
+            _trace.add_layer(_trace.layer_from_message(
+                "Active editor document",
+                _doc_message,
+                source="src.agent_loop.build_agent_prompt",
+            ))
+        if _skills_message:
+            _trace.add_layer(_trace.layer_from_message(
+                "Skills context",
+                _skills_message,
+                source="src.agent_loop.build_agent_prompt",
+            ))
+        _trace.set_context({
+            "agent_prompt_injected": True,
+            "active_document_injected": bool(_doc_message),
+            "skills_injected": bool(_skills_message),
+            "mcp_schema_count": len(mcp_schemas or []),
+        })
+    except Exception:
+        pass
+
     return merged, mcp_schemas
 
 
@@ -2395,6 +2423,11 @@ async def stream_agent_loop(
             if result.get("diff"):
                 tool_event["diff"] = result["diff"]
             tool_events.append(tool_event)
+            try:
+                from src import debug_trace as _trace
+                _trace.add_tool_event(tool_event)
+            except Exception:
+                pass
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
